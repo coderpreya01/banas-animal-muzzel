@@ -1,0 +1,14 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
+pydantic-settings>=2.2
+requests>=2.31
+ultralytics>=8.2
+lap>=0.5.12
+torch>=2.2
+torchvision>=0.17
+opencv-python-headless>=4.9
+numpy>=1.26
+Pillow>=10.0

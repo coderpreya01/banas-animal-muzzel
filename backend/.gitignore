@@ -1,0 +1,29 @@
+# secrets: NEVER commit
+.env
+.env.*
+
+# python
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# runtime data and models
+data/
+static/
+*.npz
+*.pt
+*.pth
+*.onnx
+
+# caches
+.cache/
+.torch/
+
+# editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
