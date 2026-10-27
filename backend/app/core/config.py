@@ -13,7 +13,7 @@ class Settings(BaseSettings):
     # REQUIRED. Render Postgres URL, set it as an environment variable, never in code.
     DATABASE_URL: str = "postgresql://u3m7grklvtlo6:qGxDjpOplUGKMhbaCjcFiKrHlgTsokWa@dpg-d6fevnpdrdic739um8ng-a.oregon-postgres.render.com/dbzvtfeophlfnr"
     ANIMALS_TABLE: str = "animals"           # table owned by the BBBRC Node API (read-only here)
-    DEFAULT_SPECIES: str = "buffalo"         # shown in messages ("Buffalo found: BBBRC-B001 ...")
+    DEFAULT_SPECIES: str = "cow"         # shown in messages ("Cow found: BBBRC-B001 ...")
     CORS_ORIGINS: str = "*"                  # comma separated, or *
 
     DATA_DIR: Path = BASE_DIR / "data"
