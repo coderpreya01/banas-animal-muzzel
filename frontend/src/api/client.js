@@ -33,6 +33,10 @@ export const getAnimal = (id) => api.get(`/api/animals/${id}`).then((r) => r.dat
 export const identifyMedia = (fields, onUpload) =>
   api.post("/api/identify/media", form(fields), { onUploadProgress: onUpload }).then((r) => r.data);
 
+// send an image LINK (e.g. Cloudinary URL) instead of a file -> same result as the photo upload
+export const identifyUrl = (image_url, opts = {}) =>
+  api.post("/api/identify/url", { image_url, ...opts }).then((r) => r.data);
+
 export const verify = (fields) => api.post("/api/verify", form(fields)).then((r) => r.data);
 export const liveFrame = (fields) => api.post("/api/live/frame", form(fields)).then((r) => r.data);
 export const liveStop = (sid) => api.delete(`/api/live/${sid}`).catch(() => {});

@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from app.core import config as C
 from app.db import crud
 from app.db.session import init_db
-from app.routers import animals, identify, live, verify
+from app.routers import animals, identify, identify_url, live, verify
 from app.services import embedding_sync
 from app.services.state import get_models
 
@@ -35,7 +35,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Animal Muzzle Re-ID API", version="2.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=False,   # all origins allowed
                    allow_methods=["*"], allow_headers=["*"])
-for r in (animals.router, animals.sync_router, identify.router, verify.router, live.router):
+for r in (animals.router, animals.sync_router, identify.router, identify_url.router, verify.router, live.router):
     app.include_router(r)
 
 
