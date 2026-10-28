@@ -1,5 +1,9 @@
 """Running 'average cow' vector. Subtracting it removes what ALL cows share (coat colour,
-head shape, pose) so only what makes one animal different is compared."""
+head shape, pose) so only what makes one animal different is compared.
+
+The embedding vector is [HEAD part | BODY part]. `split` = length of the head part.
+centered() centres and normalises each part separately and weights them (HEAD_WEIGHT), so
+the dot product of two centered vectors = HEAD_WEIGHT * head_sim + (1 - HEAD_WEIGHT) * body_sim."""
 import threading
 
 import numpy as np
@@ -12,6 +16,7 @@ class Population:
         self.path = C.settings.DATA_DIR / f"population_{name}.npz"
         self.lock = threading.Lock()
         self.sum, self.n = None, 0
+        self.split = None                     # set by the embedder: length of the head part
         if self.path.exists():
             try:
                 d = np.load(self.path)
@@ -51,9 +56,19 @@ def set_active(pop: Population) -> None:
     _ACTIVE = pop
 
 
+def _unit(x: np.ndarray) -> np.ndarray:
+    return x / (np.linalg.norm(x, axis=-1, keepdims=True) + 1e-9)
+
+
 def centered(x) -> np.ndarray:
     x = np.asarray(x, dtype=np.float32)
-    m = _ACTIVE.mean() if _ACTIVE is not None else None
+    pop = _ACTIVE
+    m = pop.mean() if pop is not None else None
     if m is not None and m.shape[-1] == x.shape[-1]:
         x = x - m
-    return x / (np.linalg.norm(x, axis=-1, keepdims=True) + 1e-9)
+    s = getattr(pop, "split", None) if pop is not None else None
+    if s and x.shape[-1] > s:
+        wh = float(np.sqrt(C.HEAD_WEIGHT))
+        wb = float(np.sqrt(1.0 - C.HEAD_WEIGHT))
+        return np.concatenate([_unit(x[..., :s]) * wh, _unit(x[..., s:]) * wb], axis=-1).astype(np.float32)
+    return _unit(x)

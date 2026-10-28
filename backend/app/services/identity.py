@@ -1,8 +1,11 @@
 """Open-set re-identification: known animal / new animal / uncertain.
 
-    best >= ACCEPT and best - second >= MARGIN -> match
-    best <  NEW                                -> new
-    otherwise                                  -> uncertain (or resolve() -> match / new)
+    best >= ACCEPT and best - second >= MARGIN                      -> match
+    best >= SOFT_ACCEPT and best - second >= CLEAR_MARGIN (2+ cows) -> match  (clear winner)
+    best <  NEW but best >= POSSIBLE and best - second >= CLEAR_MARGIN (2+ cows)
+                                                                    -> uncertain ("possible match", user confirms)
+    best <  NEW                                                     -> new
+    otherwise                                                       -> uncertain (or resolve() -> match / new)
 Per-animal score = (1-w) * best sample similarity + w * similarity to the animal's prototype (w = PROTO_WEIGHT).
 Several angles of one animal are several samples, so ANY registered angle can match.
 Provisional animals of the current run get negative ids (-1, -2, ...) until saved."""
@@ -64,6 +67,10 @@ class IdentityManager:
             out[cid] = (1.0 - w) * float(sims[sel].max()) + w * float(proto @ q)
         return sorted(out.items(), key=lambda kv: kv[1], reverse=True)
 
+    def _soft_thr(self) -> float:
+        """Lower acceptance level used only when the best animal is a CLEAR winner."""
+        return max(self.new_thr, min(C.SOFT_ACCEPT_THRESHOLD, self.accept_thr))
+
     def decide(self, query, species: str, exclude: Iterable[int] = ()) -> Decision:
         ranked = self.rank(query, species, exclude)
         if not ranked:
@@ -73,7 +80,14 @@ class IdentityManager:
         d = dict(cow_id=best_id, score=best, second=second, ranked=ranked[:3])
         if best >= self.accept_thr and (best - second) >= self.margin:
             return Decision("match", **d)
+        # clear winner: well above every other registered animal (needs at least 2 animals to compare)
+        if len(ranked) > 1 and best >= self._soft_thr() and (best - second) >= C.CLEAR_MARGIN:
+            return Decision("match", **d)
         if best < self.new_thr:
+            # low score, but one registered animal is clearly ahead of all the others -> "possible match":
+            # the user decides (never accepted automatically)
+            if len(ranked) > 1 and best >= C.POSSIBLE_THRESHOLD and (best - second) >= C.CLEAR_MARGIN:
+                return Decision("uncertain", **d)
             return Decision("new", **d)
         return Decision("uncertain", **d)
 

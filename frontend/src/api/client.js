@@ -33,6 +33,10 @@ export const getAnimal = (id) => api.get(`/api/animals/${id}`).then((r) => r.dat
 export const identifyMedia = (fields, onUpload) =>
   api.post("/api/identify/media", form(fields), { onUploadProgress: onUpload }).then((r) => r.data);
 
+// "yes, this result is animal X": saves the result as one more view of that animal
+export const confirmSample = (token, animal_id) =>
+  api.post("/api/identify/confirm", { token, animal_id }).then((r) => r.data);
+
 // send an image LINK (e.g. Cloudinary URL) instead of a file -> same result as the photo upload
 export const identifyUrl = (image_url, opts = {}) =>
   api.post("/api/identify/url", { image_url, ...opts }).then((r) => r.data);
@@ -40,3 +44,9 @@ export const identifyUrl = (image_url, opts = {}) =>
 export const verify = (fields) => api.post("/api/verify", form(fields)).then((r) => r.data);
 export const liveFrame = (fields) => api.post("/api/live/frame", form(fields)).then((r) => r.data);
 export const liveStop = (sid) => api.delete(`/api/live/${sid}`).catch(() => {});
+
+
+// queued job: upload once, then poll for progress + partial results
+export const startMediaJob = (fields, onUpload) =>
+  api.post("/api/identify/media/jobs", form(fields), { onUploadProgress: onUpload }).then((r) => r.data);
+export const getMediaJob = (id) => api.get(`/api/identify/media/jobs/${id}`).then((r) => r.data);

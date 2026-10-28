@@ -1,8 +1,9 @@
 """Pretrained animal detection + ByteTrack tracking + muzzle localisation. No training needed.
-Muzzle order: models/muzzle_detector.pt (fine-tuned YOLO) -> heading-aware head estimate."""
+Muzzle order: models/muzzle_detector.pt (fine-tuned YOLO) -> heading-aware head estimate.
+For group PHOTOS (both_ends=True) a side-view animal gets BOTH possible head ends as candidates."""
 from collections import defaultdict, deque
-from dataclasses import dataclass
-from typing import List, Tuple
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -20,6 +21,7 @@ class Det:
     muzzle_bbox: BBox
     muzzle_fallback: bool = True
     penalty: float = 0.0          # 0..1 chance that the head crop is contaminated
+    alt_muzzles: List[BBox] = field(default_factory=list)   # other possible head crops (photos only)
 
 
 def iou(a: BBox, b: BBox) -> float:
@@ -86,15 +88,18 @@ class AnimalDetector:
                 self._heading[tid] = 1 if dx > 0 else -1
         return self._heading.get(tid, 0)
 
-    def _run(self, frame, tracking: bool) -> List[Det]:
+    def _run(self, frame, tracking: bool, both_ends: bool = False,
+             conf: Optional[float] = None, imgsz: Optional[int] = None) -> List[Det]:
         h, w = frame.shape[:2]
+        conf = conf if conf is not None else self.conf
+        imgsz = imgsz or settings.DETECT_IMGSZ
         if tracking:
-            r = self.model.track(frame, persist=True, tracker="bytetrack.yaml", conf=self.conf,
-                                 classes=self.class_ids, agnostic_nms=True, imgsz=settings.DETECT_IMGSZ,
+            r = self.model.track(frame, persist=True, tracker="bytetrack.yaml", conf=conf,
+                                 classes=self.class_ids, agnostic_nms=True, imgsz=imgsz,
                                  verbose=False)[0]
         else:
-            r = self.model.predict(frame, conf=self.conf, classes=self.class_ids, agnostic_nms=True,
-                                   imgsz=settings.DETECT_IMGSZ, verbose=False)[0]
+            r = self.model.predict(frame, conf=conf, classes=self.class_ids, agnostic_nms=True,
+                                   imgsz=imgsz, verbose=False)[0]
         out, min_area = [], settings.MIN_BOX_FRAC * w * h
         for k, b in enumerate(r.boxes):
             tid = (int(b.id[0]) if b.id is not None else None) if tracking else k + 1
@@ -107,7 +112,12 @@ class AnimalDetector:
             sp = self.force or self.model.names[int(b.cls[0])]
             heading = self._heading_of(tid, bb) if tracking else 0
             mb, fb = self._muzzle(frame, bb, heading)
-            out.append(Det(tid, sp, bb, float(b.conf[0]), mb, fb))
+            alts: List[BBox] = []
+            # single photo, side view, head direction unknown -> try BOTH ends, the matcher keeps the better one
+            if both_ends and not tracking and fb and (bb[2] - bb[0]) >= 1.15 * (bb[3] - bb[1]):
+                mb = estimate_muzzle(bb, -1)
+                alts = [estimate_muzzle(bb, 1)]
+            out.append(Det(tid, sp, bb, float(b.conf[0]), mb, fb, alt_muzzles=alts))
         for i, d in enumerate(out):                           # crop-contamination penalty
             pen = max([_overlap_frac(d.muzzle_bbox, o.muzzle_bbox) for j, o in enumerate(out) if i != j] or [0.0])
             bw, bh = d.bbox[2] - d.bbox[0], d.bbox[3] - d.bbox[1]
@@ -119,6 +129,7 @@ class AnimalDetector:
     def track(self, frame) -> List[Det]:
         return self._run(frame, True)
 
-    def detect(self, frame) -> List[Det]:
+    def detect(self, frame, both_ends: bool = False, conf: Optional[float] = None,
+               imgsz: Optional[int] = None) -> List[Det]:
         """Single photo, no tracking."""
-        return self._run(frame, False)
+        return self._run(frame, False, both_ends, conf, imgsz)

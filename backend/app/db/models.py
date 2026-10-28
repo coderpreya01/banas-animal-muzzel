@@ -11,9 +11,11 @@ from app.db.session import Base
 
 
 class AnimalEmbedding(Base):
-    """One row per (animal, image slot). slot 1..4 = animals.Image1..Image4."""
+    """One row per (animal, image slot, model). slot 1..4 = animals.Image1..Image4,
+    11..14 = other head end of a side view, >= 100 = views confirmed by a user.
+    The model is part of the key, so two services with different models never overwrite each other."""
     __tablename__ = "animal_embedding"
-    __table_args__ = (UniqueConstraint("animal_id", "slot", name="uq_animal_embedding_slot"),)
+    __table_args__ = (UniqueConstraint("animal_id", "slot", "model", name="uq_animal_embedding_slot_model"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     animal_id: Mapped[int] = mapped_column(Integer, index=True)       # animals.id (no FK: table is owned by Node)

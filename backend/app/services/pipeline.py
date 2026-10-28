@@ -266,24 +266,53 @@ def track_vectors(video, detector, embedder, cfg: Optional[AutoIDConfig] = None)
 
 
 def analyze_image(frame: np.ndarray, detector, embedder, fallback_whole: bool = False,
-                  species: Optional[str] = None) -> List[dict]:
+                  species: Optional[str] = None, group: bool = False) -> List[dict]:
     """Photo -> one entry per animal (largest first). With fallback_whole, a photo without a
-    detected animal is treated as a close-up muzzle photo."""
+    detected animal is treated as a close-up muzzle photo.
+
+    Every entry is embedded from TWO crops: the head crop (muzzle texture) and the whole animal box
+    (coat colour / pattern), so a wrong head crop alone no longer decides the result.
+
+    group=True (identify from a mobile / group photo): detect at a bigger size with a lower confidence,
+    and for a side-view animal also return the OTHER possible head end in entry["alts"]
+    (each alt = dict(crop, vec, sharp)); the caller keeps whichever variant matches best."""
     detector.reset()
+    if group:
+        dets = detector.detect(frame, both_ends=True, conf=C.PHOTO_DETECT_CONF, imgsz=C.PHOTO_DETECT_IMGSZ)
+    else:
+        dets = detector.detect(frame)
     found = []
-    for d in detector.detect(frame):
+    for d in dets:
         crop = safe_crop(frame, d.muzzle_bbox)
+        alts = [c for c in (safe_crop(frame, ab) for ab in d.alt_muzzles) if c is not None]
+        if crop is None and alts:
+            crop, alts = alts[0], alts[1:]
         if crop is not None:
-            found.append((d, crop))
+            found.append((d, crop, alts, safe_crop(frame, d.bbox)))
     found.sort(key=lambda x: -_area(x[0].bbox))
-    items = [(species or d.species, c, d.bbox) for d, c in found]
+    items = [(species or d.species, c, d.bbox, alts, body) for d, c, alts, body in found]
     if not items and fallback_whole and min(frame.shape[:2]) >= C.MIN_CROP_PX:
         h, w = frame.shape[:2]
-        items = [(species or "cow", frame, (0, 0, w, h))]
+        items = [(species or "cow", frame, (0, 0, w, h), [], frame)]
     if not items:
         return []
-    vecs = embedder.embed_batch([c for _, c, _ in items])
-    return [dict(species=sp, crop=c, vec=v, sharp=sharpness(c), bbox=bb) for (sp, c, bb), v in zip(items, vecs)]
+    all_crops: List[np.ndarray] = []
+    all_bodies: List[np.ndarray] = []
+    for _, c, _, alts, body in items:
+        for x in [c] + list(alts):
+            all_crops.append(x)
+            all_bodies.append(body if body is not None else x)
+    vecs = embedder.embed_batch(all_crops, all_bodies)
+    out, k = [], 0
+    for sp, c, bb, alts, _body in items:
+        main_vec = vecs[k]
+        k += 1
+        alt_items = []
+        for ac in alts:
+            alt_items.append(dict(crop=ac, vec=vecs[k], sharp=sharpness(ac)))
+            k += 1
+        out.append(dict(species=sp, crop=c, vec=main_vec, sharp=sharpness(c), bbox=bb, alts=alt_items,head_guess=bool(alt_items)))
+    return out
 
 
 # ------------------------------------------------------------------ identity

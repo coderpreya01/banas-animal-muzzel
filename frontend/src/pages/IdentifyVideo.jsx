@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import AnimalInfo from "../components/AnimalInfo.jsx";
 import Metric from "../components/Metric.jsx";
 import ThresholdControls, { DEFAULT_TH, thFields } from "../components/ThresholdControls.jsx";
-import { errMsg, identifyMedia } from "../api/client.js";
+import { confirmSample, errMsg, getMediaJob, startMediaJob } from "../api/client.js";
 
 const MAX_FILES = 20;
 const IMG = /\.(jpe?g|png|webp)$/i;
@@ -11,7 +11,8 @@ const VID = /\.(mp4|mov|avi|mkv)$/i;
 const isPhoto = (f) => IMG.test(f.name);
 const isMedia = (f) => IMG.test(f.name) || VID.test(f.name);
 const fileKey = (f) => `${f.name}|${f.size}|${f.lastModified}`;
-const BADGE = { found: "ok", not_found: "bad", unsure: "warn" };
+const BADGE = { found: "ok", not_found: "bad", unsure: "warn", no_head: "warn" };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export default function IdentifyVideo() {
   const [files, setFiles] = useState([]);
@@ -21,6 +22,7 @@ export default function IdentifyVideo() {
   const [up, setUp] = useState(0);
   const [err, setErr] = useState("");
   const [r, setR] = useState(null);
+  const [job, setJob] = useState(null);
   const pick = useRef(null);
 
   // files ACCUMULATE; copy the FileList BEFORE clearing the input, otherwise the list becomes empty
@@ -42,9 +44,27 @@ export default function IdentifyVideo() {
   const nVideos = files.length - nPhotos;
 
   const run = async () => {
-    setErr(""); setR(null); setBusy(true); setUp(0);
+    setErr(""); setR(null); setJob(null); setBusy(true); setUp(0);
     try {
-      setR(await identifyMedia({ files, ...thFields(th), ...o }, (p) => setUp(p.total ? p.loaded / p.total : 0)));
+      const { job_id } = await startMediaJob({ files, ...thFields(th), ...o },
+        (p) => setUp(p.total ? p.loaded / p.total : 0));
+      let fails = 0;
+      for (;;) {
+        let j;
+        try {
+          j = await getMediaJob(job_id);
+          fails = 0;
+        } catch (e) {
+          if (e?.response?.status === 404 || ++fails > 5) throw e;
+          await sleep(1500);
+          continue;
+        }
+        setJob(j);
+        if (j.response) setR(j.response);            // results appear file by file
+        if (j.status === "done") break;
+        if (j.status === "error") throw new Error(j.error || "Processing failed");
+        await sleep(1000);
+      }
     } catch (e) { setErr(errMsg(e)); }
     setBusy(false);
   };
@@ -53,7 +73,9 @@ export default function IdentifyVideo() {
     <>
       <h1>🎬 Identify from Photos &amp; Videos</h1>
       <p className="muted">Upload photos, videos or both. A registered cow is recognised and its saved data is shown.
-        A cow that is not registered shows "not found" - nothing is registered here (use Register Animal for that).</p>
+        A cow that is not registered shows "not found" - nothing is registered here (use Register Animal for that).
+        If the system is only <b>nearly</b> sure, it shows a possible match: compare it with the registered photos and
+        confirm it, and this angle will be recognised next time.</p>
       <div className="card">
         <div className="row wrap">
           <button type="button" className="btn" disabled={busy} onClick={() => pick.current?.click()}>📂 Add photos / videos</button>
@@ -88,7 +110,11 @@ export default function IdentifyVideo() {
           </div>
         </details>
         <button className="btn primary gap-top" disabled={!files.length || busy || th.newThr > th.accept} onClick={run}>
-          {busy ? (up < 1 ? `Uploading ${Math.round(up * 100)}%` : "Detecting & matching...") : "🔍 Identify animals"}
+          {!busy ? "🔍 Identify animals"
+            : up < 1 ? `Uploading ${Math.round(up * 100)}%`
+            : !job ? "Starting..."
+            : job.status === "queued" ? `In queue (${job.position} ahead)...`
+            : `Analysing ${Math.min(job.done + 1, job.total)}/${job.total}: ${job.current}`}
         </button>
       </div>
       {err && <p className="error">{err}</p>}
@@ -97,14 +123,38 @@ export default function IdentifyVideo() {
   );
 }
 
+function RegisteredPhotos({ a }) {
+  const imgs = (a?.images || []).slice(0, 4);
+  if (!imgs.length) return null;
+  return (
+    <div className="thumbs gap-top">
+      {imgs.map((u) => <img key={u} src={u} alt="" style={{ maxHeight: 110, borderRadius: 8, marginRight: 6 }} />)}
+    </div>
+  );
+}
+
 function Result({ r }) {
   const d = r.diag || {};
+  const [msg, setMsg] = useState({});            // token -> confirmation text
+  const [saving, setSaving] = useState("");
+
+  const confirm = async (x, c) => {
+    setSaving(`${x.token}-${c.id}`);
+    try {
+      const res = await confirmSample(x.token, c.id);
+      setMsg((m) => ({ ...m, [x.token]: `✅ ${res.message} Photos from this angle will be recognised next time.` }));
+    } catch (e) {
+      setMsg((m) => ({ ...m, [x.token]: `⚠️ ${errMsg(e)}` }));
+    }
+    setSaving("");
+  };
+
   return (
     <>
       <div className="grid4 gap-top">
         <Metric label="Registered animals found" value={r.n_unique_found} />
         <Metric label="Not found (not registered)" value={r.n_not_found} />
-        <Metric label="Unsure" value={r.n_unsure} />
+        <Metric label="Possible matches to confirm" value={r.n_unsure} />
         <Metric label="Files checked" value={r.n_photos + r.n_videos} />
       </div>
       {!r.saved && <p className="info">Visits were not logged (option is off).</p>}
@@ -118,15 +168,33 @@ function Result({ r }) {
             <div className="grow">
               <div className="muted">{x.kind === "photo" ? "🖼️" : "🎬"} {x.source} - {x.label}</div>
               <p className={`badge ${BADGE[x.verdict]}`}>{x.message}{x.similarity != null && ` - similarity ${x.similarity}`}</p>
+
               {x.animal && <><h4 style={{ margin: "6px 0" }}>Registered data</h4><AnimalInfo a={x.animal} />
                 <p className="muted">Visits logged so far: {x.animal.visits}</p></>}
-              {x.verdict === "not_found" && <p className="muted">This animal is not in the database. <Link to="/register">Register it first →</Link></p>}
-              {x.verdict === "unsure" && <p className="muted">Take a closer, sharper, front-facing muzzle photo and try again.</p>}
+
+              {x.verdict === "unsure" && x.closest && (
+                <>
+                  <h4 style={{ margin: "6px 0" }}>Possible match: {x.closest.tag}{x.closest.name ? ` (${x.closest.name})` : ""}</h4>
+                  <AnimalInfo a={x.closest} />
+                  <p className="muted">Registered photos of {x.closest.tag} - is it the same cow?</p>
+                  <RegisteredPhotos a={x.closest} />
+                </>
+              )}
+              {x.verdict === "unsure" && !x.closest && <p className="muted">Take a closer, sharper, front-facing muzzle photo and try again.</p>}
+              {x.verdict === "not_found" && <p className="muted">This animal is not in the database. <Link to="/register">Register it first →</Link> If it IS one of the cows below, confirm it there.</p>}
+
               {x.candidates.length > 0 && (
-                <details className="gap-top"><summary>Top candidates</summary>
-                  <table><thead><tr><th>ID</th><th>Name</th><th>Similarity</th></tr></thead>
-                    <tbody>{x.candidates.map((c) => <tr key={c.id}><td>{c.tag}</td><td>{c.name}</td><td>{c.score}</td></tr>)}</tbody></table>
+                <details className="gap-top" open={x.verdict !== "found"}>
+                  <summary>Top candidates{x.token ? " - confirm the right cow" : ""}</summary>
+                  <table><thead><tr><th>ID</th><th>Name</th><th>Similarity</th>{x.token && <th></th>}</tr></thead>
+                    <tbody>{x.candidates.map((c) => (
+                      <tr key={c.id}><td>{c.tag}</td><td>{c.name}</td><td>{c.score}</td>
+                        {x.token && <td><button type="button" className="btn" disabled={saving === `${x.token}-${c.id}`}
+                          onClick={() => confirm(x, c)}>✅ This is {c.tag}</button></td>}
+                      </tr>))}</tbody></table>
+                  {x.token && <p className="muted">Only confirm when you are sure: the photo is saved as another view of that cow.</p>}
                 </details>)}
+              {x.token && msg[x.token] && <p className="info">{msg[x.token]}</p>}
             </div>
           </div>))}
 

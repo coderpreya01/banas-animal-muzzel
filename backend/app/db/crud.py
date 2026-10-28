@@ -6,7 +6,13 @@ Python writes only: animal_embedding, sightings.
 Node column -> Python key used by the rest of the code:
   tag_id->tag, spice->breed, dams305daymilk->dam_milk_305, sairdammilkyieleiid->sire_dam_milk,
   Image1..4 -> images / image_slots
+
+animal_embedding.slot: 1..4   = the registered images (written by the sync),
+                       11..14 = other possible head end of a side-view image (written by the sync),
+                       >= 100 = views CONFIRMED by a user (never touched by the sync).
+Rows are unique per (animal_id, slot, MODEL).
 """
+import hashlib
 import re
 from datetime import date, datetime
 from functools import lru_cache
@@ -26,6 +32,7 @@ if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", TABLE):
     raise ValueError("ANIMALS_TABLE must be a plain table name")
 
 IMAGE_SLOTS = (1, 2, 3, 4)
+CONFIRMED_SLOT_START = 100
 
 
 def _q(name: str) -> str:
@@ -45,7 +52,6 @@ def refresh_columns() -> None:
 
 
 def columns_seen() -> List[str]:
-    """For diagnostics: the columns found in the animals table (empty list = table not found)."""
     try:
         return list(_columns())
     except NoSuchTableError:
@@ -144,7 +150,6 @@ def _shape(r: dict) -> dict:
 
 
 def list_raw() -> List[dict]:
-    """Animals as shaped dicts, without visit/sample counters (used by the embedding sync)."""
     return [_shape(r) for r in _fetch()]
 
 
@@ -172,7 +177,8 @@ def first_image_url(animal_id: int) -> Optional[str]:
 
 # ------------------------------------------------------------------ embeddings (animal_embedding)
 def get_gallery(model: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """(animal_ids, species, vectors) for the embeddings made by `model`. Deleted animals are ignored."""
+    """(animal_ids, species, vectors) for the embeddings made by `model`. Deleted animals are ignored.
+    Includes the registered images, their alternative head views AND the views confirmed by users."""
     valid = _ids()
     with SessionLocal() as s:
         rows = s.execute(select(AnimalEmbedding.animal_id, AnimalEmbedding.vector)
@@ -181,16 +187,27 @@ def get_gallery(model: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     rows = [r for r in rows if r[0] in valid]
     if not rows:
         return np.array([], dtype=int), np.array([], dtype=object), np.zeros((0, 1), np.float32)
-    # YOLO species labels are unreliable (buffalo = "cow"), and MATCH_ACROSS_SPECIES=True anyway
     return (np.array([r[0] for r in rows]), np.array(["cow"] * len(rows), dtype=object),
             np.stack([np.frombuffer(bytes(r[1]), dtype=np.float32) for r in rows]))
 
 
-def embedding_state() -> Dict[Tuple[int, int], dict]:
+def embedding_state(model: Optional[str] = None) -> Dict[Tuple[int, int], dict]:
+    """(animal_id, slot) -> state, for ONE model (so another service's rows are never mixed in)."""
+    q = select(AnimalEmbedding.animal_id, AnimalEmbedding.slot, AnimalEmbedding.url_hash,
+               AnimalEmbedding.model, AnimalEmbedding.status)
+    if model:
+        q = q.where(AnimalEmbedding.model == model)
     with SessionLocal() as s:
-        rows = s.execute(select(AnimalEmbedding.animal_id, AnimalEmbedding.slot, AnimalEmbedding.url_hash,
-                                AnimalEmbedding.model, AnimalEmbedding.status)).all()
+        rows = s.execute(q).all()
     return {(r[0], r[1]): dict(url_hash=r[2], model=r[3], status=r[4]) for r in rows}
+
+
+def embedding_models() -> Dict[str, int]:
+    """Diagnostics: how many usable embeddings exist per model name."""
+    with SessionLocal() as s:
+        return {r[0]: r[1] for r in s.execute(
+            select(AnimalEmbedding.model, func.count()).where(AnimalEmbedding.status == "ok")
+            .group_by(AnimalEmbedding.model))}
 
 
 def save_embedding(animal_id: int, slot: int, url: str, url_hash: str, model: str,
@@ -199,15 +216,39 @@ def save_embedding(animal_id: int, slot: int, url: str, url_hash: str, model: st
     vals = dict(animal_id=animal_id, slot=slot, image_url=url, url_hash=url_hash, model=model,
                 dim=0 if vector is None else int(len(vector)), vector=vec, status=status, error=error[:500])
     stmt = pg_insert(AnimalEmbedding).values(**vals)
-    stmt = stmt.on_conflict_do_update(constraint="uq_animal_embedding_slot",
-                                      set_={**{k: stmt.excluded[k] for k in vals if k not in ("animal_id", "slot")},
-                                            "updated_at": func.now()})
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_animal_embedding_slot_model",
+        set_={**{k: stmt.excluded[k] for k in vals if k not in ("animal_id", "slot", "model")},
+              "updated_at": func.now()})
     with SessionLocal() as s:
         s.execute(stmt)
         s.commit()
 
 
+def add_confirmed_sample(animal_id: int, vector, model: str, cap: int) -> Optional[int]:
+    """Save a view that a user CONFIRMED as this animal (slot >= 100, kept by the sync).
+    Returns the slot, or None when the animal already has `cap` confirmed views (for this model).
+    The same vector is never stored twice."""
+    vec = np.asarray(vector, dtype=np.float32)
+    h = "confirmed-" + hashlib.sha256(vec.tobytes()).hexdigest()[:40]
+    with SessionLocal() as s:
+        rows = s.execute(select(AnimalEmbedding.slot, AnimalEmbedding.url_hash)
+                         .where(AnimalEmbedding.animal_id == animal_id,
+                                AnimalEmbedding.model == model,
+                                AnimalEmbedding.slot >= CONFIRMED_SLOT_START)).all()
+    for slot, url_hash in rows:
+        if url_hash == h:
+            return slot                                   # double click / same result confirmed twice
+    if len(rows) >= cap:
+        return None
+    used = {r[0] for r in rows}
+    slot = next(i for i in range(CONFIRMED_SLOT_START, CONFIRMED_SLOT_START + cap + 1) if i not in used)
+    save_embedding(animal_id, slot, "confirmed", h, model, vec)
+    return slot
+
+
 def delete_embedding(animal_id: int, slot: int) -> None:
+    """Removes the slot for every model (the image URL is gone)."""
     with SessionLocal() as s:
         s.execute(delete(AnimalEmbedding).where(AnimalEmbedding.animal_id == animal_id,
                                                 AnimalEmbedding.slot == slot))
